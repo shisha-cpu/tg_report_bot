@@ -1,0 +1,21 @@
+{
+  "name": "tg_report_bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "cron": "^4.4.0",
+    "dotenv": "^17.2.3",
+    "moment-timezone": "^0.6.0",
+    "mongoose": "^9.1.5",
+    "telegraf": "^4.16.3"
+  }
+}

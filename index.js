@@ -1,10 +1,6 @@
 require('dotenv').config();
 const bot = require('./bot');
-const setupCommands = require('./commands');
 const setupReminders = require('./reminders');
-
-// Setup all commands
-setupCommands(bot);
 
 // Setup reminders
 setupReminders(bot);

@@ -6,27 +6,28 @@ const moment = require('moment-timezone');
 // Function to send daily summary to the owner
 const sendDailySummary = async (bot, ownerId) => {
   try {
-    // Get today's date
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Get today's date with timezone consideration
+    const moment = require('moment-timezone');
+    const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
+    const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
 
     // Find today's reports
     const reports = await Report.find({
       date: {
-        $gte: today,
-        $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
+        $gte: todayStart,
+        $lte: todayEnd
       }
     })
     .populate('adminId')
     .populate('objectId');
 
     if (reports.length === 0) {
-      await bot.telegram.sendMessage(ownerId, `📊 Нет отчетов за ${today.toLocaleDateString('ru-RU')}`);
+      await bot.telegram.sendMessage(ownerId, `📊 Нет отчетов за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}`);
       return;
     }
 
-    let reportText = `📊 Отчеты за ${today.toLocaleDateString('ru-RU')}:\n\n`;
-    
+    let reportText = `📊 Отчеты за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}:\n\n`;
+
     // Group reports by admin
     const reportsByAdmin = {};
     for (const report of reports) {
@@ -40,7 +41,7 @@ const sendDailySummary = async (bot, ownerId) => {
     // Format the report text
     for (const [adminName, adminReports] of Object.entries(reportsByAdmin)) {
       reportText += `👤 Администратор: ${adminName}\n`;
-      
+
       for (const report of adminReports) {
         reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
         reportText += `🧹 Горничные: ${report.cleaners}\n`;
@@ -58,4 +59,73 @@ const sendDailySummary = async (bot, ownerId) => {
   }
 };
 
-module.exports = { sendDailySummary };
+// Function to send reports for a specific date range
+const sendReportsForDateRange = async (bot, ownerId, startDate, endDate) => {
+  try {
+    // Find reports in the date range
+    const reports = await Report.find({
+      date: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    })
+    .populate('adminId')
+    .populate('objectId')
+    .sort({ date: -1 });
+
+    if (reports.length === 0) {
+      await bot.telegram.sendMessage(ownerId, `📊 Нет отчетов в периоде с ${moment(startDate).format('DD.MM.YYYY')} по ${moment(endDate).format('DD.MM.YYYY')}`);
+      return;
+    }
+
+    let reportText = `📊 Отчеты с ${moment(startDate).format('DD.MM.YYYY')} по ${moment(endDate).format('DD.MM.YYYY')} (${reports.length}):\n\n`;
+
+    // Limit to first 50 reports to prevent message too long error
+    const reportsToShow = reports.slice(0, 50);
+
+    // Group reports by date and admin
+    const reportsByDate = {};
+    for (const report of reportsToShow) {
+      const reportDate = moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY');
+      if (!reportsByDate[reportDate]) {
+        reportsByDate[reportDate] = {};
+      }
+
+      const adminName = report.adminId.name;
+      if (!reportsByDate[reportDate][adminName]) {
+        reportsByDate[reportDate][adminName] = [];
+      }
+
+      reportsByDate[reportDate][adminName].push(report);
+    }
+
+    // Format the report text
+    for (const [date, admins] of Object.entries(reportsByDate)) {
+      reportText += `📅 ${date}\n`;
+
+      for (const [adminName, adminReports] of Object.entries(admins)) {
+        reportText += `  👤 ${adminName}:\n`;
+
+        for (const report of adminReports) {
+          reportText += `    🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+          reportText += `    🧹 Горничные: ${report.cleaners}\n`;
+          reportText += `    👷 Подсобные: ${report.helpers}\n`;
+          reportText += `    💰 Доплаты: ${report.payments}\n`;
+          reportText += `    🔧 Поломки: ${report.malfunctions}\n`;
+          reportText += `    ✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+        }
+      }
+    }
+
+    if (reports.length > 50) {
+      reportText += `... и еще ${reports.length - 50} отчетов`;
+    }
+
+    // Send the report to the owner
+    await bot.telegram.sendMessage(ownerId, reportText);
+  } catch (error) {
+    console.error('Error sending date range reports:', error);
+  }
+};
+
+module.exports = { sendDailySummary, sendReportsForDateRange };

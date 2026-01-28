@@ -4,6 +4,7 @@ const connectDB = require('./db/connectDB');
 const Admin = require('./models/Admin');
 const Report = require('./models/Report');
 const ObjectModel = require('./models/Object');
+const moment = require('moment-timezone');
 
 // Initialize bot with token
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -14,7 +15,9 @@ bot.use(session({
     waitingFor: null,
     reportData: {},
     selectedObjectId: null,
-    menuState: 'main' // Добавляем состояние меню
+    selectedObjectIds: [], // Для хранения нескольких выбранных объектов
+    menuState: 'main', // Добавляем состояние меню
+    dateRange: null // Для хранения диапазона дат
   })
 }));
 
@@ -47,6 +50,7 @@ bot.start(async (ctx) => {
 
     // Check if user is owner
     const isOwner = userId === ownerId;
+console.log('userId' , userId);
 
     // Register admin if not exists
     const userExists = await Admin.findOne({ telegramId: userId });
@@ -73,9 +77,10 @@ bot.start(async (ctx) => {
     if (isOwner) {
       // Owner menu - full access
       keyboard = Markup.keyboard([
-        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-        ['📝 Отправить отчет', 'ℹ️ Помощь']
+        ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+        ['ℹ️ Помощь']
       ]).resize();
+      // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
     } else {
       // Regular admin menu - limited access
       keyboard = Markup.keyboard([
@@ -121,8 +126,8 @@ bot.help(async (ctx) => {
   if (isOwner) {
     // Owner menu - full access
     keyboard = Markup.keyboard([
-      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-      ['📝 Отправить отчет', 'ℹ️ Помощь']
+      ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+        ['ℹ️ Помощь']
     ]).resize();
   } else {
     // Regular admin menu - limited access
@@ -146,14 +151,25 @@ bot.hears('📝 Отправить отчет', async (ctx) => {
     return;
   }
 
-  // Create inline keyboard for object selection
+  // Create inline keyboard for multiple object selection
   const keyboard = {
     inline_keyboard: objects.map(obj => [
-      { text: obj.description || obj.address, callback_data: `select_object_${obj._id}` }
-    ]).concat([[{ text: '🔙 Назад', callback_data: 'back_to_main' }]])
+      { text: `✅ ${obj.description || obj.address}`, callback_data: `select_multi_object_${obj._id}` }
+    ]).concat([
+      [{ text: '✅ Выбрать все', callback_data: 'select_all_objects' }],
+      [{ text: '📥 Отправить отчеты', callback_data: 'submit_multiple_reports' }],
+      [{ text: '🔙 Назад', callback_data: 'back_to_main' }]
+    ])
   };
 
-  await ctx.reply('Выберите объект, над которым работали сегодня:', {
+  // Show selected objects
+  let selectedText = '';
+  if (ctx.session.selectedObjectIds && ctx.session.selectedObjectIds.length > 0) {
+    const selectedObjects = await ObjectModel.find({ _id: { $in: ctx.session.selectedObjectIds } });
+    selectedText = `\n\nВыбранные объекты (${ctx.session.selectedObjectIds.length}): ${selectedObjects.map(obj => obj.description || obj.address).join(', ')}`;
+  }
+
+  await ctx.reply(`Выберите объекты, над которыми работали сегодня:${selectedText}`, {
     reply_markup: keyboard
   });
 });
@@ -161,136 +177,16 @@ bot.hears('📝 Отправить отчет', async (ctx) => {
 bot.hears('📊 Сегодняшние отчеты', async (ctx) => {
   ctx.session.menuState = 'view_reports';
 
-  const userId = ctx.from.id;
-  const ownerId = parseInt(process.env.OWNER_ID);
+  // Create inline keyboard for date range selection
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '📅 Сегодня', callback_data: 'view_reports_today' }],
+      [{ text: '📆 Выбрать период', callback_data: 'view_reports_date_range' }],
+      [{ text: '🔙 Назад', callback_data: 'back_to_main' }]
+    ]
+  };
 
-  // Only allow owner to view all reports
-  if (userId !== ownerId) {
-    // Regular admin can only see their own reports
-    const admin = await Admin.findOne({ telegramId: userId });
-    if (!admin) {
-      await ctx.reply('Пожалуйста, сначала зарегистрируйтесь, используя команду /start');
-      return;
-    }
-
-    // Get today's date
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    // Find today's reports for this admin only
-    const reports = await Report.find({
-      adminId: admin._id,
-      date: {
-        $gte: today,
-        $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
-      }
-    }).populate('adminId').populate('objectId');
-
-    if (reports.length === 0) {
-      await ctx.reply('У вас сегодня нет отчетов.');
-      // Return to main menu
-      ctx.session.menuState = 'main';
-
-      let keyboard;
-      if (userId === ownerId) {
-        keyboard = Markup.keyboard([
-          ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-          ['📝 Отправить отчет', 'ℹ️ Помощь']
-        ]).resize();
-      } else {
-        keyboard = Markup.keyboard([
-          ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
-          ['ℹ️ Помощь']
-        ]).resize();
-      }
-
-      await ctx.reply('Выберите действие:', {
-        reply_markup: keyboard
-      });
-      return;
-    }
-
-    let reportText = `📊 Ваши отчеты за ${today.toLocaleDateString('ru-RU')}:\n\n`;
-    for (const report of reports) {
-      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
-      reportText += `🧹 Горничные: ${report.cleaners}\n`;
-      reportText += `👷 Подсобные: ${report.helpers}\n`;
-      reportText += `💰 Доплаты: ${report.payments}\n`;
-      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
-      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
-    }
-
-    // Return to main menu
-    ctx.session.menuState = 'main';
-
-    let keyboard;
-    if (userId === ownerId) {
-      keyboard = Markup.keyboard([
-        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-        ['📝 Отправить отчет', 'ℹ️ Помощь']
-      ]).resize();
-    } else {
-      keyboard = Markup.keyboard([
-        ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
-        ['ℹ️ Помощь']
-      ]).resize();
-    }
-
-    await ctx.reply(reportText, {
-      reply_markup: keyboard
-    });
-    return;
-  }
-
-  // Owner can see all reports
-  // Get today's date
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  // Find today's reports
-  const reports = await Report.find({
-    date: {
-      $gte: today,
-      $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
-    }
-  }).populate('adminId').populate('objectId');
-
-  if (reports.length === 0) {
-    await ctx.reply('Сегодня еще нет отчетов.');
-  } else {
-    let reportText = `📊 Отчеты за ${today.toLocaleDateString('ru-RU')}:\n\n`;
-    for (const report of reports) {
-      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
-      reportText += `👤 Администратор: ${report.adminId.name}\n`;
-      reportText += `🧹 Горничные: ${report.cleaners}\n`;
-      reportText += `👷 Подсобные: ${report.helpers}\n`;
-      reportText += `💰 Доплаты: ${report.payments}\n`;
-      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
-      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
-    }
-
-    await ctx.reply(reportText);
-  }
-
-  // Return to main menu
-  ctx.session.menuState = 'main';
-
-  let keyboard;
-  // const userId = ctx.from.id;
-  // const ownerId = parseInt(process.env.OWNER_ID);
-  if (userId === ownerId) {
-    keyboard = Markup.keyboard([
-      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-      ['📝 Отправить отчет', 'ℹ️ Помощь']
-    ]).resize();
-  } else {
-    keyboard = Markup.keyboard([
-      ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
-      ['ℹ️ Помощь']
-    ]).resize();
-  }
-
-  await ctx.reply('Выберите действие:', {
+  await ctx.reply('Выберите период для просмотра отчетов:', {
     reply_markup: keyboard
   });
 });
@@ -299,37 +195,135 @@ bot.hears('ℹ️ Помощь', async (ctx) => {
   await ctx.reply('/help');
 });
 
-bot.hears('🔧 Управление объектами', async (ctx) => {
-  const userId = ctx.from.id;
-  const ownerId = parseInt(process.env.OWNER_ID);
+// bot.hears('🔧 Управление объектами', async (ctx) => {
+//   const userId = ctx.from.id;
+//   const ownerId = parseInt(process.env.OWNER_ID);
 
-  // Only allow owner to manage objects
-  if (userId !== ownerId) {
-    await ctx.reply('❌ У вас нет прав для управления объектами.');
+//   // Only allow owner to manage objects
+//   if (userId !== ownerId) {
+//     await ctx.reply('❌ У вас нет прав для управления объектами.');
 
-    // Return to main menu
-    ctx.session.menuState = 'main';
+//     // Return to main menu
+//     ctx.session.menuState = 'main';
 
-    let keyboard = Markup.keyboard([
-      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-      ['📝 Отправить отчет', 'ℹ️ Помощь']
-    ]).resize();
+//     let keyboard = Markup.keyboard([
+//       ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+//       ['ℹ️ Помощь']
+//     ]).resize();
+//     // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
 
-    await ctx.reply('Выберите действие:', keyboard);
-    return;
-  }
+//     await ctx.reply('Выберите действие:', keyboard);
+//     return;
+//   }
 
-  ctx.session.menuState = 'manage_objects';
+//   ctx.session.menuState = 'manage_objects';
 
-  const keyboard = Markup.keyboard([
-    ['➕ Добавить объект', '📋 Список объектов'],
-    ['🗑️ Удалить объект', '🔙 Назад']
-  ]).resize();
+//   // Create inline keyboard for object management
+//   const keyboard = {
+//     inline_keyboard: [
+//       [
+//         { text: '➕ Добавить объект', callback_data: 'manage_add_object' },
+//         { text: '📋 Список объектов', callback_data: 'manage_list_objects' }
+//       ],
+//       [
+//         { text: '🗑️ Удалить объект', callback_data: 'manage_delete_object' },
+//         { text: '🔙 Назад', callback_data: 'manage_back_to_main' }
+//       ]
+//     ]
+//   };
 
-  await ctx.reply('Управление объектами:', keyboard);
-});
+//   await ctx.reply('Управление объектами:', { reply_markup: keyboard });
+// });
 
-// Handle callback queries for object selection
+
+// // Add callback handlers for object management buttons to handle cases where user clicks on buttons in the keyboard
+// bot.action('manage_add_object', async (ctx) => {
+//   ctx.session.waitingFor = 'add_object_address';
+//   await ctx.editMessageText('Введите адрес нового объекта:');
+// });
+
+// bot.action('manage_list_objects', async (ctx) => {
+//   const objects = await ObjectModel.find({});
+//   if (objects.length === 0) {
+//     await ctx.editMessageText('Нет добавленных объектов.');
+//   } else {
+//     let objectsList = 'Список объектов:\n';
+//     objects.forEach((obj, index) => {
+//       objectsList += `${index + 1}. ${obj.description || obj.address}\n`;
+//     });
+
+//     await ctx.editMessageText(objectsList);
+//   }
+
+//   // Return to manage objects menu
+//   const keyboard = Markup.keyboard([
+//     ['➕ Добавить объект', '📋 Список объектов'],
+//     ['🗑️ Удалить объект', '🔙 Назад']
+//   ]).resize();
+
+//   await ctx.reply('Управление объектами:', {
+//     reply_markup: keyboard
+//   });
+// });
+
+// bot.action('manage_delete_object', async (ctx) => {
+//   const objects = await ObjectModel.find({});
+//   if (objects.length === 0) {
+//     await ctx.editMessageText('Нет добавленных объектов для удаления.');
+
+//     // Return to manage objects menu
+//     const keyboard = Markup.keyboard([
+//       ['➕ Добавить объект', '📋 Список объектов'],
+//       ['🗑️ Удалить объект', '🔙 Назад']
+//     ]).resize();
+
+//     await ctx.reply('Управление объектами:', keyboard);
+//     return;
+//   }
+
+//   // Create inline keyboard for object selection for deletion
+//   const keyboard = {
+//     inline_keyboard: objects.map(obj => [
+//       { text: obj.description || obj.address, callback_data: `delete_object_${obj._id}` }
+//     ]).concat([[{ text: '🔙 Назад', callback_data: 'back_to_manage_objects' }]])
+//   };
+
+//   await ctx.editMessageText('Выберите объект для удаления:', {
+//     reply_markup: keyboard
+//   });
+// });
+
+// bot.action('manage_back_to_main', async (ctx) => {
+//   ctx.session.menuState = 'main';
+//   ctx.session.waitingFor = null;
+//   ctx.session.reportData = {};
+//   ctx.session.selectedObjectId = null;
+
+//   const userId = ctx.from.id;
+//   const ownerId = parseInt(process.env.OWNER_ID);
+
+//   let keyboard;
+//   if (userId === ownerId) {
+//     // Owner menu - full access
+//     keyboard = Markup.keyboard([
+//       ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+//       ['ℹ️ Помощь']
+//     ]).resize();
+//     // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
+//   } else {
+//     // Regular admin menu - limited access
+//     keyboard = Markup.keyboard([
+//       ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+//       ['ℹ️ Помощь']
+//     ]).resize();
+//   }
+
+//   await ctx.editMessageText('Выберите действие:', {
+//     reply_markup: keyboard
+//   });
+// });
+
+// Handle callback queries for single object selection (for backward compatibility)
 bot.action(/^select_object_(.+)$/, async (ctx) => {
   try {
     const objectId = ctx.match[1];
@@ -342,6 +336,140 @@ bot.action(/^select_object_(.+)$/, async (ctx) => {
   } catch (error) {
     console.error('Error in object selection:', error);
     await ctx.answerCbQuery('Ошибка при выборе объекта');
+  }
+});
+
+// Handle callback queries for multiple object selection
+bot.action(/^select_multi_object_(.+)$/, async (ctx) => {
+  try {
+    const objectId = ctx.match[1];
+
+    // Toggle object selection
+    if (ctx.session.selectedObjectIds.includes(objectId)) {
+      // Remove from selection
+      ctx.session.selectedObjectIds = ctx.session.selectedObjectIds.filter(id => id !== objectId);
+      await ctx.answerCbQuery('Объект убран из выбора');
+    } else {
+      // Add to selection
+      ctx.session.selectedObjectIds.push(objectId);
+      await ctx.answerCbQuery('Объект добавлен к выбору');
+    }
+
+    // Refresh the message with updated selections
+    const objects = await ObjectModel.find({});
+    const keyboard = {
+      inline_keyboard: objects.map(obj => [
+        {
+          text: `${ctx.session.selectedObjectIds.includes(obj._id.toString()) ? '✅' : '☑️'} ${obj.description || obj.address}`,
+          callback_data: `select_multi_object_${obj._id}`
+        }
+      ]).concat([
+        [{ text: '✅ Выбрать все', callback_data: 'select_all_objects' }],
+        [{ text: '📥 Отправить отчеты', callback_data: 'submit_multiple_reports' }],
+        [{ text: '🔙 Назад', callback_data: 'back_to_main' }]
+      ])
+    };
+
+    // Show selected objects
+    let selectedText = '';
+    if (ctx.session.selectedObjectIds && ctx.session.selectedObjectIds.length > 0) {
+      const selectedObjects = await ObjectModel.find({ _id: { $in: ctx.session.selectedObjectIds } });
+      selectedText = `\n\nВыбранные объекты (${ctx.session.selectedObjectIds.length}): ${selectedObjects.map(obj => obj.description || obj.address).join(', ')}`;
+    }
+
+    await ctx.editMessageText(`Выберите объекты, над которыми работали сегодня:${selectedText}`, {
+      reply_markup: keyboard
+    });
+  } catch (error) {
+    console.error('Error in multiple object selection:', error);
+    await ctx.answerCbQuery('Ошибка при выборе объекта');
+  }
+});
+
+// Handle callback query for selecting all objects
+bot.action('select_all_objects', async (ctx) => {
+  try {
+    const objects = await ObjectModel.find({});
+    ctx.session.selectedObjectIds = objects.map(obj => obj._id.toString());
+
+    await ctx.answerCbQuery('Все объекты выбраны');
+
+    // Refresh the message with updated selections
+    const keyboard = {
+      inline_keyboard: objects.map(obj => [
+        {
+          text: `✅ ${obj.description || obj.address}`,
+          callback_data: `select_multi_object_${obj._id}`
+        }
+      ]).concat([
+        [{ text: '❌ Снять выделение', callback_data: 'deselect_all_objects' }],
+        [{ text: '📥 Отправить отчеты', callback_data: 'submit_multiple_reports' }],
+        [{ text: '🔙 Назад', callback_data: 'back_to_main' }]
+      ])
+    };
+
+    // Show selected objects
+    let selectedText = '';
+    if (ctx.session.selectedObjectIds && ctx.session.selectedObjectIds.length > 0) {
+      const selectedObjects = await ObjectModel.find({ _id: { $in: ctx.session.selectedObjectIds } });
+      selectedText = `\n\nВыбранные объекты (${ctx.session.selectedObjectIds.length}): ${selectedObjects.map(obj => obj.description || obj.address).join(', ')}`;
+    }
+
+    await ctx.editMessageText(`Выберите объекты, над которыми работали сегодня:${selectedText}`, {
+      reply_markup: keyboard
+    });
+  } catch (error) {
+    console.error('Error in select all objects:', error);
+    await ctx.answerCbQuery('Ошибка при выборе всех объектов');
+  }
+});
+
+// Handle callback query for deselecting all objects
+bot.action('deselect_all_objects', async (ctx) => {
+  try {
+    ctx.session.selectedObjectIds = [];
+
+    await ctx.answerCbQuery('Выделение снято');
+
+    // Refresh the message with updated selections
+    const objects = await ObjectModel.find({});
+    const keyboard = {
+      inline_keyboard: objects.map(obj => [
+        {
+          text: `☑️ ${obj.description || obj.address}`,
+          callback_data: `select_multi_object_${obj._id}`
+        }
+      ]).concat([
+        [{ text: '✅ Выбрать все', callback_data: 'select_all_objects' }],
+        [{ text: '📥 Отправить отчеты', callback_data: 'submit_multiple_reports' }],
+        [{ text: '🔙 Назад', callback_data: 'back_to_main' }]
+      ])
+    };
+
+    await ctx.editMessageText('Выберите объекты, над которыми работали сегодня:', {
+      reply_markup: keyboard
+    });
+  } catch (error) {
+    console.error('Error in deselect all objects:', error);
+    await ctx.answerCbQuery('Ошибка при снятии выделения');
+  }
+});
+
+// Handle callback query for submitting multiple reports
+bot.action('submit_multiple_reports', async (ctx) => {
+  try {
+    if (!ctx.session.selectedObjectIds || ctx.session.selectedObjectIds.length === 0) {
+      await ctx.answerCbQuery('Пожалуйста, выберите хотя бы один объект');
+      return;
+    }
+
+    // Ask for cleaners
+    await ctx.editMessageText('Введите список горничных, которые работали сегодня (для всех выбранных объектов):');
+    ctx.session.waitingFor = 'cleaners';
+    ctx.session.menuState = 'report_cleaners';
+  } catch (error) {
+    console.error('Error in submit multiple reports:', error);
+    await ctx.answerCbQuery('Ошибка при отправке отчетов');
   }
 });
 
@@ -359,9 +487,10 @@ bot.action('back_to_main', async (ctx) => {
   if (userId === ownerId) {
     // Owner menu - full access
     keyboard = Markup.keyboard([
-      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-      ['📝 Отправить отчет', 'ℹ️ Помощь']
+      ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+      ['ℹ️ Помощь']
     ]).resize();
+    // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
   } else {
     // Regular admin menu - limited access
     keyboard = Markup.keyboard([
@@ -441,10 +570,484 @@ bot.action('back_to_select_object', async (ctx) => {
   });
 });
 
+// Handle callback queries for viewing today's reports
+bot.action('view_reports_today', async (ctx) => {
+  ctx.session.menuState = 'view_reports';
+
+  const userId = ctx.from.id;
+  const ownerId = parseInt(process.env.OWNER_ID);
+
+  // Only allow owner to view all reports
+  if (userId !== ownerId) {
+    // Regular admin can only see their own reports
+    const admin = await Admin.findOne({ telegramId: userId });
+    if (!admin) {
+      await ctx.answerCbQuery('Пожалуйста, сначала зарегистрируйтесь');
+      return;
+    }
+
+    // Get today's date with timezone consideration
+    const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
+    const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
+
+    // Find today's reports for this admin only
+    const reports = await Report.find({
+      adminId: admin._id,
+      date: {
+        $gte: todayStart,
+        $lte: todayEnd
+      }
+    }).populate('adminId').populate('objectId');
+
+    if (reports.length === 0) {
+      await ctx.editMessageText('У вас сегодня нет отчетов.');
+      // Return to main menu
+      ctx.session.menuState = 'main';
+
+      let keyboard;
+      if (userId === ownerId) {
+        keyboard = Markup.keyboard([
+          ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+          ['📝 Отправить отчет', 'ℹ️ Помощь']
+        ]).resize();
+      } else {
+        keyboard = Markup.keyboard([
+          ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+          ['ℹ️ Помощь']
+        ]).resize();
+      }
+
+      await ctx.reply('Выберите действие:', {
+        reply_markup: keyboard
+      });
+      return;
+    }
+
+    let reportText = `📊 Ваши отчеты за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}:\n\n`;
+    for (const report of reports) {
+      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+      reportText += `🧹 Горничные: ${report.cleaners}\n`;
+      reportText += `👷 Подсобные: ${report.helpers}\n`;
+      reportText += `💰 Доплаты: ${report.payments}\n`;
+      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
+      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+    }
+
+    // Return to main menu
+    ctx.session.menuState = 'main';
+
+    let keyboard;
+    if (userId === ownerId) {
+      keyboard = Markup.keyboard([
+        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+        ['📝 Отправить отчет', 'ℹ️ Помощь']
+      ]).resize();
+    } else {
+      keyboard = Markup.keyboard([
+        ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+        ['ℹ️ Помощь']
+      ]).resize();
+    }
+
+    await ctx.editMessageText(reportText, {
+      reply_markup: keyboard
+    });
+    return;
+  }
+
+  // Owner can see all reports
+  // Get today's date with timezone consideration
+  const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
+  const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
+
+  // Find today's reports
+  const reports = await Report.find({
+    date: {
+      $gte: todayStart,
+      $lte: todayEnd
+    }
+  }).populate('adminId').populate('objectId');
+
+  if (reports.length === 0) {
+    await ctx.editMessageText('Сегодня еще нет отчетов.');
+  } else {
+    let reportText = `📊 Отчеты за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}:\n\n`;
+    for (const report of reports) {
+      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+      reportText += `👤 Администратор: ${report.adminId.name}\n`;
+      reportText += `🧹 Горничные: ${report.cleaners}\n`;
+      reportText += `👷 Подсобные: ${report.helpers}\n`;
+      reportText += `💰 Доплаты: ${report.payments}\n`;
+      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
+      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+    }
+
+    await ctx.editMessageText(reportText);
+  }
+
+  // Return to main menu
+  ctx.session.menuState = 'main';
+
+  let keyboard;
+  // const userId = ctx.from.id;
+  // const ownerId = parseInt(process.env.OWNER_ID);
+  if (userId === ownerId) {
+    keyboard = Markup.keyboard([
+      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+      ['📝 Отправить отчет', 'ℹ️ Помощь']
+    ]).resize();
+  } else {
+    keyboard = Markup.keyboard([
+      ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+      ['ℹ️ Помощь']
+    ]).resize();
+  }
+
+  await ctx.reply('Выберите действие:', {
+    reply_markup: keyboard
+  });
+});
+
+// Handle callback queries for viewing reports with date range
+bot.action('view_reports_date_range', async (ctx) => {
+  ctx.session.waitingFor = 'date_range_start';
+  ctx.session.dateRange = {}; // Initialize date range object
+
+  await ctx.editMessageText(
+    'Введите начальную дату в формате ДД.ММ.ГГГГ (например, 01.01.2024):'
+  );
+});
+
+// Handle callback queries for viewing all reports (for owner)
+bot.action('view_all_reports', async (ctx) => {
+  const userId = ctx.from.id;
+  const ownerId = parseInt(process.env.OWNER_ID);
+
+  if (userId !== ownerId) {
+    await ctx.answerCbQuery('❌ Только владелец может просматривать все отчеты');
+    return;
+  }
+
+  // Find all reports (no date filter)
+  const reports = await Report.find({})
+    .populate('adminId')
+    .populate('objectId')
+    .sort({ date: -1 }); // Sort by date descending
+
+  if (reports.length === 0) {
+    await ctx.editMessageText('Нет доступных отчетов.');
+  } else {
+    let reportText = `📊 Все отчеты (${reports.length}):\n\n`;
+
+    // Limit to first 50 reports to prevent message too long error
+    const reportsToShow = reports.slice(0, 50);
+
+    for (const report of reportsToShow) {
+      reportText += `📅 ${moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY HH:mm')}\n`;
+      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+      reportText += `👤 Администратор: ${report.adminId.name}\n`;
+      reportText += `🧹 Горничные: ${report.cleaners}\n`;
+      reportText += `👷 Подсобные: ${report.helpers}\n`;
+      reportText += `💰 Доплаты: ${report.payments}\n`;
+      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
+      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+    }
+
+    if (reports.length > 50) {
+      reportText += `... и еще ${reports.length - 50} отчетов`;
+    }
+
+    await ctx.editMessageText(reportText);
+  }
+
+  // Return to main menu
+  ctx.session.menuState = 'main';
+
+  let keyboard;
+  if (userId === ownerId) {
+    keyboard = Markup.keyboard([
+      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+      ['📝 Отправить отчет', 'ℹ️ Помощь']
+    ]).resize();
+  } else {
+    keyboard = Markup.keyboard([
+      ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+      ['ℹ️ Помощь']
+    ]).resize();
+  }
+
+  await ctx.reply('Выберите действие:', {
+    reply_markup: keyboard
+  });
+});
+
 // Handle text messages during report submission
 bot.on('text', async (ctx) => {
   if (!ctx.session) {
     ctx.session = {};
+  }
+
+  // First, check if this is a menu command and we're in the right state
+  // if (ctx.session.menuState === 'manage_objects') {
+  //   if (ctx.message.text === '➕ Добавить объект') {
+  //     // Handle add object
+  //     ctx.session.waitingFor = 'add_object_address';
+  //     await ctx.reply('Введите адрес нового объекта:');
+  //     return;
+  //   } else if (ctx.message.text === '📋 Список объектов') {
+  //     // Handle list objects
+  //     const objects = await ObjectModel.find({});
+  //     if (objects.length === 0) {
+  //       await ctx.reply('Нет добавленных объектов.');
+  //     } else {
+  //       let objectsList = 'Список объектов:\n';
+  //       objects.forEach((obj, index) => {
+  //         objectsList += `${index + 1}. ${obj.description || obj.address}\n`;
+  //       });
+
+  //       await ctx.reply(objectsList);
+  //     }
+
+  //     // Return to manage objects menu
+  //     const keyboard = {
+  //       inline_keyboard: [
+  //         [
+  //           { text: '➕ Добавить объект', callback_data: 'manage_add_object' },
+  //           { text: '📋 Список объектов', callback_data: 'manage_list_objects' }
+  //         ],
+  //         [
+  //           { text: '🗑️ Удалить объект', callback_data: 'manage_delete_object' },
+  //           { text: '🔙 Назад', callback_data: 'manage_back_to_main' }
+  //         ]
+  //       ]
+  //     };
+
+  //     await ctx.reply('Управление объектами:', {
+  //       reply_markup: keyboard
+  //     });
+  //     return;
+  //   } else if (ctx.message.text === '🗑️ Удалить объект') {
+  //     // Handle delete object
+  //     const objects = await ObjectModel.find({});
+  //     if (objects.length === 0) {
+  //       await ctx.reply('Нет добавленных объектов для удаления.');
+
+  //       // Return to manage objects menu
+  //       const keyboard = {
+  //         inline_keyboard: [
+  //           [
+  //             { text: '➕ Добавить объект', callback_data: 'manage_add_object' },
+  //             { text: '📋 Список объектов', callback_data: 'manage_list_objects' }
+  //           ],
+  //           [
+  //             { text: '🗑️ Удалить объект', callback_data: 'manage_delete_object' },
+  //             { text: '🔙 Назад', callback_data: 'manage_back_to_main' }
+  //           ]
+  //         ]
+  //       };
+
+  //       await ctx.reply('Управление объектами:', { reply_markup: keyboard });
+  //       return;
+  //     }
+
+  //     // Create inline keyboard for object selection for deletion
+  //     const keyboard = {
+  //       inline_keyboard: objects.map(obj => [
+  //         { text: obj.description || obj.address, callback_data: `delete_object_${obj._id}` }
+  //       ]).concat([[{ text: '🔙 Назад', callback_data: 'back_to_manage_objects' }]])
+  //     };
+
+  //     await ctx.reply('Выберите объект для удаления:', {
+  //       reply_markup: keyboard
+  //     });
+  //     return;
+  //   } else if (ctx.message.text === '🔙 Назад') {
+  //     // Handle back button from manage objects menu
+  //     ctx.session.menuState = 'main';
+  //     ctx.session.waitingFor = null;
+  //     ctx.session.reportData = {};
+  //     ctx.session.selectedObjectId = null;
+
+  //     const userId = ctx.from.id;
+  //     const ownerId = parseInt(process.env.OWNER_ID);
+
+  //     let keyboard;
+  //     if (userId === ownerId) {
+  //       // Owner menu - full access
+  //       keyboard = Markup.keyboard([
+  //         ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+  //         ['ℹ️ Помощь']
+  //       ]).resize();
+  //       // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
+  //     } else {
+  //       // Regular admin menu - limited access
+  //       keyboard = Markup.keyboard([
+  //         ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+  //         ['ℹ️ Помощь']
+  //       ]).resize();
+  //     }
+
+  //     await ctx.reply('Выберите действие:', {
+  //       reply_markup: keyboard
+  //     });
+  //     return;
+  //   }
+  // }
+
+  // Handle date range input
+  if (ctx.session.waitingFor === 'date_range_start') {
+    try {
+      // Parse the start date
+      const startDate = moment(ctx.message.text, 'DD.MM.YYYY', true);
+
+      if (!startDate.isValid()) {
+        await ctx.reply('Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ (например, 01.01.2024):');
+        return;
+      }
+
+      // Store the start date
+      ctx.session.dateRange.startDate = startDate.toDate();
+
+      // Ask for end date
+      ctx.session.waitingFor = 'date_range_end';
+      await ctx.reply('Введите конечную дату в формате ДД.ММ.ГГГГ (например, 31.01.2024):');
+    } catch (error) {
+      console.error('Error parsing start date:', error);
+      await ctx.reply('Произошла ошибка при обработке даты. Пожалуйста, попробуйте снова.');
+      ctx.session.waitingFor = null;
+    }
+    return;
+  } else if (ctx.session.waitingFor === 'date_range_end') {
+    try {
+      // Parse the end date
+      const endDate = moment(ctx.message.text, 'DD.MM.YYYY', true);
+
+      if (!endDate.isValid()) {
+        await ctx.reply('Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ (например, 31.01.2024):');
+        return;
+      }
+
+      // Store the end date
+      ctx.session.dateRange.endDate = endDate.endOf('day').toDate(); // Include the whole end day
+
+      // Validate that end date is not before start date
+      if (ctx.session.dateRange.endDate < ctx.session.dateRange.startDate) {
+        await ctx.reply('Конечная дата не может быть раньше начальной даты. Пожалуйста, введите конечную дату снова:');
+        return;
+      }
+
+      // Now get reports for the date range
+      const userId = ctx.from.id;
+      const ownerId = parseInt(process.env.OWNER_ID);
+
+      // Only allow owner to view all reports in date range
+      if (userId !== ownerId) {
+        // Regular admin can only see their own reports
+        const admin = await Admin.findOne({ telegramId: userId });
+        if (!admin) {
+          await ctx.reply('Пожалуйста, сначала зарегистрируйтесь, используя команду /start');
+          return;
+        }
+
+        // Find reports for this admin in the date range
+        const reports = await Report.find({
+          adminId: admin._id,
+          date: {
+            $gte: ctx.session.dateRange.startDate,
+            $lte: ctx.session.dateRange.endDate
+          }
+        }).populate('adminId').populate('objectId').sort({ date: -1 });
+
+        if (reports.length === 0) {
+          await ctx.reply(`У вас нет отчетов в периоде с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')}.`);
+        } else {
+          let reportText = `📊 Ваши отчеты с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')} (${reports.length}):\n\n`;
+
+          // Limit to first 50 reports to prevent message too long error
+          const reportsToShow = reports.slice(0, 50);
+
+          for (const report of reportsToShow) {
+            reportText += `📅 ${moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY HH:mm')}\n`;
+            reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+            reportText += `🧹 Горничные: ${report.cleaners}\n`;
+            reportText += `👷 Подсобные: ${report.helpers}\n`;
+            reportText += `💰 Доплаты: ${report.payments}\n`;
+            reportText += `🔧 Поломки: ${report.malfunctions}\n`;
+            reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+          }
+
+          if (reports.length > 50) {
+            reportText += `... и еще ${reports.length - 50} отчетов`;
+          }
+
+          await ctx.reply(reportText);
+        }
+      } else {
+        // Owner can see all reports in the date range
+        const reports = await Report.find({
+          date: {
+            $gte: ctx.session.dateRange.startDate,
+            $lte: ctx.session.dateRange.endDate
+          }
+        }).populate('adminId').populate('objectId').sort({ date: -1 });
+
+        if (reports.length === 0) {
+          await ctx.reply(`Нет отчетов в периоде с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')}.`);
+        } else {
+          let reportText = `📊 Отчеты с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')} (${reports.length}):\n\n`;
+
+          // Limit to first 50 reports to prevent message too long error
+          const reportsToShow = reports.slice(0, 50);
+
+          for (const report of reportsToShow) {
+            reportText += `📅 ${moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY HH:mm')}\n`;
+            reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+            reportText += `👤 Администратор: ${report.adminId.name}\n`;
+            reportText += `🧹 Горничные: ${report.cleaners}\n`;
+            reportText += `👷 Подсобные: ${report.helpers}\n`;
+            reportText += `💰 Доплаты: ${report.payments}\n`;
+            reportText += `🔧 Поломки: ${report.malfunctions}\n`;
+            reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+          }
+
+          if (reports.length > 50) {
+            reportText += `... и еще ${reports.length - 50} отчетов`;
+          }
+
+          await ctx.reply(reportText);
+        }
+      }
+
+      // Reset session and return to main menu
+      ctx.session.waitingFor = null;
+      ctx.session.dateRange = null;
+      ctx.session.menuState = 'main';
+
+      let keyboard;
+      if (userId === ownerId) {
+        // Owner menu - full access
+        keyboard = Markup.keyboard([
+          ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+          ['ℹ️ Помощь']
+        ]).resize();
+        // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
+      } else {
+        // Regular admin menu - limited access
+        keyboard = Markup.keyboard([
+          ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+          ['ℹ️ Помощь']
+        ]).resize();
+      }
+
+      await ctx.reply('Выберите действие:', {
+        reply_markup: keyboard
+      });
+    } catch (error) {
+      console.error('Error parsing end date:', error);
+      await ctx.reply('Произошла ошибка при обработке даты. Пожалуйста, попробуйте снова.');
+      ctx.session.waitingFor = null;
+    }
+    return;
   }
 
   // Only process if user is in the middle of submitting a report
@@ -508,59 +1111,6 @@ bot.on('text', async (ctx) => {
       ctx.session.waitingFor = null;
       ctx.session.reportData = null;
     }
-  } else if (ctx.session.menuState === 'manage_objects' && ctx.message.text === '➕ Добавить объект') {
-    // Handle add object
-    ctx.session.waitingFor = 'add_object_address';
-    await ctx.reply('Введите адрес нового объекта:');
-  } else if (ctx.session.menuState === 'manage_objects' && ctx.message.text === '📋 Список объектов') {
-    // Handle list objects
-    const objects = await ObjectModel.find({});
-    if (objects.length === 0) {
-      await ctx.reply('Нет добавленных объектов.');
-    } else {
-      let objectsList = 'Список объектов:\n';
-      objects.forEach((obj, index) => {
-        objectsList += `${index + 1}. ${obj.description || obj.address}\n`;
-      });
-
-      await ctx.reply(objectsList);
-    }
-
-    // Return to manage objects menu
-    const keyboard = Markup.keyboard([
-      ['➕ Добавить объект', '📋 Список объектов'],
-      ['🗑️ Удалить объект', '🔙 Назад']
-    ]).resize();
-
-    await ctx.reply('Управление объектами:', {
-      reply_markup: keyboard
-    });
-  } else if (ctx.session.menuState === 'manage_objects' && ctx.message.text === '🗑️ Удалить объект') {
-    // Handle delete object
-    const objects = await ObjectModel.find({});
-    if (objects.length === 0) {
-      await ctx.reply('Нет добавленных объектов для удаления.');
-
-      // Return to manage objects menu
-      const keyboard = Markup.keyboard([
-        ['➕ Добавить объект', '📋 Список объектов'],
-        ['🗑️ Удалить объект', '🔙 Назад']
-      ]).resize();
-
-      await ctx.reply('Управление объектами:', keyboard);
-      return;
-    }
-
-    // Create inline keyboard for object selection for deletion
-    const keyboard = {
-      inline_keyboard: objects.map(obj => [
-        { text: obj.description || obj.address, callback_data: `delete_object_${obj._id}` }
-      ]).concat([[{ text: '🔙 Назад', callback_data: 'back_to_manage_objects' }]])
-    };
-
-    await ctx.reply('Выберите объект для удаления:', {
-      reply_markup: keyboard
-    });
   } else if (ctx.session.waitingFor === 'add_object_address') {
     // Handle adding new object
     const address = ctx.message.text;
@@ -575,40 +1125,20 @@ bot.on('text', async (ctx) => {
 
     // Return to manage objects menu
     ctx.session.waitingFor = null;
-    const keyboard = Markup.keyboard([
-      ['➕ Добавить объект', '📋 Список объектов'],
-      ['🗑️ Удалить объект', '🔙 Назад']
-    ]).resize();
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '➕ Добавить объект', callback_data: 'manage_add_object' },
+          { text: '📋 Список объектов', callback_data: 'manage_list_objects' }
+        ],
+        [
+          { text: '🗑️ Удалить объект', callback_data: 'manage_delete_object' },
+          { text: '🔙 Назад', callback_data: 'manage_back_to_main' }
+        ]
+      ]
+    };
 
     await ctx.reply('Управление объектами:', {
-      reply_markup: keyboard
-    });
-  } else if (ctx.session.menuState === 'manage_objects' && ctx.message.text === '🔙 Назад') {
-    // Handle back button from manage objects menu
-    ctx.session.menuState = 'main';
-    ctx.session.waitingFor = null;
-    ctx.session.reportData = {};
-    ctx.session.selectedObjectId = null;
-
-    const userId = ctx.from.id;
-    const ownerId = parseInt(process.env.OWNER_ID);
-
-    let keyboard;
-    if (userId === ownerId) {
-      // Owner menu - full access
-      keyboard = Markup.keyboard([
-        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-        ['📝 Отправить отчет', 'ℹ️ Помощь']
-      ]).resize();
-    } else {
-      // Regular admin menu - limited access
-      keyboard = Markup.keyboard([
-        ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
-        ['ℹ️ Помощь']
-      ]).resize();
-    }
-
-    await ctx.reply('Выберите действие:', {
       reply_markup: keyboard
     });
   } else if (ctx.message.text === '🔙 Назад') {
@@ -653,7 +1183,7 @@ bot.action(/^ready_for_rent_(.+)$/, async (ctx) => {
       return;
     }
 
-    // Create the report
+    // Create a single report with multiple objects
     const newReport = new Report({
       adminId: admin._id,
       cleaners: ctx.session.reportData.cleaners,
@@ -661,17 +1191,21 @@ bot.action(/^ready_for_rent_(.+)$/, async (ctx) => {
       payments: ctx.session.reportData.payments,
       malfunctions: ctx.session.reportData.malfunctions,
       readyForRent: readyStatus,
-      objectId: ctx.session.selectedObjectId
+      objectId: ctx.session.selectedObjectIds.length > 0 ? ctx.session.selectedObjectIds[0] : ctx.session.selectedObjectId, // Keep backward compatibility
+      objectIds: ctx.session.selectedObjectIds // Store all selected objects
     });
 
     await newReport.save();
 
-    await ctx.editMessageText('✅ Отчет успешно отправлен!');
+    // Determine how many objects were reported
+    const objectCount = ctx.session.selectedObjectIds.length > 0 ? ctx.session.selectedObjectIds.length : (ctx.session.selectedObjectId ? 1 : 0);
+    await ctx.editMessageText(`✅ Отчет успешно отправлен! Объектов в отчете: ${objectCount}`);
 
     // Reset session and return to main menu
     ctx.session.waitingFor = null;
     ctx.session.reportData = null;
     ctx.session.selectedObjectId = null;
+    ctx.session.selectedObjectIds = []; // Clear multiple selection
     ctx.session.menuState = 'main';
 
     const userId = ctx.from.id;

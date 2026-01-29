@@ -35,7 +35,12 @@ const reportSchema = new mongoose.Schema({
   objectId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Object'
-  }
+  },
+  // Добавляем поле для хранения массива объектов
+  objectIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Object'
+  }]
 });
 
 module.exports = mongoose.model('Report', reportSchema);

@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Telegraf, session, Markup } = require('telegraf');
+const mongoose = require('mongoose');
 const connectDB = require('./db/connectDB');
 const Admin = require('./models/Admin');
 const Report = require('./models/Report');
@@ -8,7 +9,43 @@ const moment = require('moment-timezone');
 
 // Initialize bot with token
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
+const splitMessage = (text, maxLength = 4000) => {
+  const messages = [];
+  let currentMessage = '';
+  
+  // Разбиваем текст по строкам
+  const lines = text.split('\n');
+  
+  for (const line of lines) {
+    // Если добавление новой строки превысит лимит, сохраняем текущее сообщение
+    if ((currentMessage + '\n' + line).length > maxLength) {
+      if (currentMessage.length > 0) {
+        messages.push(currentMessage);
+        currentMessage = line;
+      } else {
+        // Если одна строка слишком длинная, разбиваем ее
+        while (line.length > maxLength) {
+          messages.push(line.substring(0, maxLength));
+          line = line.substring(maxLength);
+        }
+        currentMessage = line;
+      }
+    } else {
+      if (currentMessage.length === 0) {
+        currentMessage = line;
+      } else {
+        currentMessage += '\n' + line;
+      }
+    }
+  }
+  
+  // Добавляем последнее сообщение
+  if (currentMessage.length > 0) {
+    messages.push(currentMessage);
+  }
+  
+  return messages;
+};
 // Подключаем middleware для сессии
 bot.use(session({
   defaultSession: () => ({
@@ -569,13 +606,103 @@ bot.action('back_to_select_object', async (ctx) => {
     reply_markup: keyboard
   });
 });
-
+const sendReportsInParts = async (ctx, reports, isOwner = false) => {
+  const batchSize = 5; // Количество отчетов в одном сообщении
+  const totalReports = reports.length;
+  const totalBatches = Math.ceil(totalReports / batchSize);
+  
+  console.log(`Sending ${totalReports} reports in ${totalBatches} batches`);
+  
+  for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+    const startIdx = batchIndex * batchSize;
+    const endIdx = Math.min(startIdx + batchSize, totalReports);
+    const batchReports = reports.slice(startIdx, endIdx);
+    
+    let batchText = '';
+    
+    if (batchIndex === 0) {
+      // В первой части добавляем заголовок
+      if (ctx.session.dateRange) {
+        const startDate = moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY');
+        const endDate = moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY');
+        batchText = `📊 Отчеты с ${startDate} по ${endDate} (${totalReports}):\n\n`;
+      } else {
+        batchText = `📊 Отчеты (${totalReports}):\n\n`;
+      }
+    }
+    
+    // Добавляем номера отчетов в этой партии
+    const reportNumbers = batchReports.map((_, idx) => startIdx + idx + 1).join(', ');
+    batchText += `Отчеты ${reportNumbers} из ${totalReports}:\n\n`;
+    
+    // Формируем отчеты в этой партии
+    for (let i = 0; i < batchReports.length; i++) {
+      const report = batchReports[i];
+      const reportNumber = startIdx + i + 1;
+      
+      batchText += `${reportNumber}. 📅 ${moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY HH:mm')}\n`;
+      
+      // Отображаем все объекты из массива objectIds
+      if (report.objectIds && report.objectIds.length > 0) {
+        const objectAddresses = report.objectIds.map(obj => 
+          obj.description || obj.address || 'Не указан'
+        ).join(', ');
+        batchText += `   🏠 Объекты: ${objectAddresses}\n`;
+      } else if (report.objectId) {
+        batchText += `   🏠 Объект: ${report.objectId?.description || report.objectId?.address || 'Не указан'}\n`;
+      } else {
+        batchText += `   🏠 Объект: Не указан\n`;
+      }
+      
+      if (isOwner) {
+        batchText += `   👤 Администратор: ${report.adminId?.name || 'Не указан'}\n`;
+      }
+      
+      batchText += `   🧹 Горничные: ${report.cleaners.substring(0, 100)}${report.cleaners.length > 100 ? '...' : ''}\n`;
+      batchText += `   👷 Подсобные: ${report.helpers.substring(0, 100)}${report.helpers.length > 100 ? '...' : ''}\n`;
+      batchText += `   💰 Доплаты: ${report.payments.substring(0, 100)}${report.payments.length > 100 ? '...' : ''}\n`;
+      batchText += `   🔧 Поломки: ${report.malfunctions.substring(0, 100)}${report.malfunctions.length > 100 ? '...' : ''}\n`;
+      batchText += `   ✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
+    }
+    
+    // Добавляем информацию о прогрессе
+    if (batchIndex < totalBatches - 1) {
+      batchText += `--- Продолжение следует... ---\n`;
+      batchText += `Часть ${batchIndex + 1} из ${totalBatches}`;
+    } else {
+      batchText += `--- Все отчеты загружены ---\n`;
+      batchText += `Всего отчетов: ${totalReports}`;
+    }
+    
+    // Разбиваем на части если слишком длинное
+    const messages = splitMessage(batchText);
+    
+    // Отправляем все части этого батча
+    for (let i = 0; i < messages.length; i++) {
+      if (batchIndex === 0 && i === 0 && ctx.session.dateRange) {
+        // Первое сообщение отправляем как ответ
+        await ctx.reply(messages[i]);
+      } else {
+        await ctx.reply(messages[i]);
+      }
+      
+      // Небольшая задержка между сообщениями
+      if (i < messages.length - 1 || batchIndex < totalBatches - 1) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+    }
+  }
+};
 // Handle callback queries for viewing today's reports
 bot.action('view_reports_today', async (ctx) => {
   ctx.session.menuState = 'view_reports';
 
   const userId = ctx.from.id;
   const ownerId = parseInt(process.env.OWNER_ID);
+
+  // Get today's date with timezone consideration
+  const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
+  const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
 
   // Only allow owner to view all reports
   if (userId !== ownerId) {
@@ -586,10 +713,6 @@ bot.action('view_reports_today', async (ctx) => {
       return;
     }
 
-    // Get today's date with timezone consideration
-    const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
-    const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
-
     // Find today's reports for this admin only
     const reports = await Report.find({
       adminId: admin._id,
@@ -597,7 +720,7 @@ bot.action('view_reports_today', async (ctx) => {
         $gte: todayStart,
         $lte: todayEnd
       }
-    }).populate('adminId').populate('objectId');
+    }).populate('adminId').populate('objectId').populate('objectIds');
 
     if (reports.length === 0) {
       await ctx.editMessageText('У вас сегодня нет отчетов.');
@@ -607,8 +730,8 @@ bot.action('view_reports_today', async (ctx) => {
       let keyboard;
       if (userId === ownerId) {
         keyboard = Markup.keyboard([
-          ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-          ['📝 Отправить отчет', 'ℹ️ Помощь']
+          ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+          ['ℹ️ Помощь']
         ]).resize();
       } else {
         keyboard = Markup.keyboard([
@@ -623,24 +746,17 @@ bot.action('view_reports_today', async (ctx) => {
       return;
     }
 
-    let reportText = `📊 Ваши отчеты за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}:\n\n`;
-    for (const report of reports) {
-      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
-      reportText += `🧹 Горничные: ${report.cleaners}\n`;
-      reportText += `👷 Подсобные: ${report.helpers}\n`;
-      reportText += `💰 Доплаты: ${report.payments}\n`;
-      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
-      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
-    }
-
+    // Отправляем отчеты частями
+    await sendReportsInParts(ctx, reports, false);
+    
     // Return to main menu
     ctx.session.menuState = 'main';
 
     let keyboard;
     if (userId === ownerId) {
       keyboard = Markup.keyboard([
-        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-        ['📝 Отправить отчет', 'ℹ️ Помощь']
+        ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+        ['ℹ️ Помощь']
       ]).resize();
     } else {
       keyboard = Markup.keyboard([
@@ -649,52 +765,36 @@ bot.action('view_reports_today', async (ctx) => {
       ]).resize();
     }
 
-    await ctx.editMessageText(reportText, {
+    await ctx.reply('Выберите действие:', {
       reply_markup: keyboard
     });
     return;
   }
 
   // Owner can see all reports
-  // Get today's date with timezone consideration
-  const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
-  const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
-
   // Find today's reports
   const reports = await Report.find({
     date: {
       $gte: todayStart,
       $lte: todayEnd
     }
-  }).populate('adminId').populate('objectId');
+  }).populate('adminId').populate('objectId').populate('objectIds');
 
   if (reports.length === 0) {
     await ctx.editMessageText('Сегодня еще нет отчетов.');
   } else {
-    let reportText = `📊 Отчеты за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}:\n\n`;
-    for (const report of reports) {
-      reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
-      reportText += `👤 Администратор: ${report.adminId.name}\n`;
-      reportText += `🧹 Горничные: ${report.cleaners}\n`;
-      reportText += `👷 Подсобные: ${report.helpers}\n`;
-      reportText += `💰 Доплаты: ${report.payments}\n`;
-      reportText += `🔧 Поломки: ${report.malfunctions}\n`;
-      reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
-    }
-
-    await ctx.editMessageText(reportText);
+    // Отправляем отчеты частями
+    await sendReportsInParts(ctx, reports, true);
   }
 
   // Return to main menu
   ctx.session.menuState = 'main';
 
   let keyboard;
-  // const userId = ctx.from.id;
-  // const ownerId = parseInt(process.env.OWNER_ID);
   if (userId === ownerId) {
     keyboard = Markup.keyboard([
-      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
-      ['📝 Отправить отчет', 'ℹ️ Помощь']
+      ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+      ['ℹ️ Помощь']
     ]).resize();
   } else {
     keyboard = Markup.keyboard([
@@ -893,162 +993,141 @@ bot.on('text', async (ctx) => {
   //     return;
   //   }
   // }
+// Функция для разбивки длинных сообщений на части
+// Функция для отправки отчетов частями
 
   // Handle date range input
-  if (ctx.session.waitingFor === 'date_range_start') {
-    try {
-      // Parse the start date
-      const startDate = moment(ctx.message.text, 'DD.MM.YYYY', true);
+// В текстовом обработчике, найдите case для 'date_range_start':
+if (ctx.session.waitingFor === 'date_range_start') {
+  try {
+    console.log('Processing start date:', ctx.message.text);
+    
+    // Parse the start date
+    const startDate = moment(ctx.message.text, 'DD.MM.YYYY', true);
 
-      if (!startDate.isValid()) {
-        await ctx.reply('Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ (например, 01.01.2024):');
-        return;
-      }
-
-      // Store the start date
-      ctx.session.dateRange.startDate = startDate.toDate();
-
-      // Ask for end date
-      ctx.session.waitingFor = 'date_range_end';
-      await ctx.reply('Введите конечную дату в формате ДД.ММ.ГГГГ (например, 31.01.2024):');
-    } catch (error) {
-      console.error('Error parsing start date:', error);
-      await ctx.reply('Произошла ошибка при обработке даты. Пожалуйста, попробуйте снова.');
-      ctx.session.waitingFor = null;
+    if (!startDate.isValid()) {
+      console.log('Invalid start date format');
+      await ctx.reply('Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ (например, 01.01.2024):');
+      return;
     }
-    return;
-  } else if (ctx.session.waitingFor === 'date_range_end') {
-    try {
-      // Parse the end date
-      const endDate = moment(ctx.message.text, 'DD.MM.YYYY', true);
 
-      if (!endDate.isValid()) {
-        await ctx.reply('Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ (например, 31.01.2024):');
-        return;
-      }
+    // Store the start date
+    ctx.session.dateRange.startDate = startDate.toDate();
+    console.log('Start date stored:', ctx.session.dateRange.startDate);
 
-      // Store the end date
-      ctx.session.dateRange.endDate = endDate.endOf('day').toDate(); // Include the whole end day
-
-      // Validate that end date is not before start date
-      if (ctx.session.dateRange.endDate < ctx.session.dateRange.startDate) {
-        await ctx.reply('Конечная дата не может быть раньше начальной даты. Пожалуйста, введите конечную дату снова:');
-        return;
-      }
-
-      // Now get reports for the date range
-      const userId = ctx.from.id;
-      const ownerId = parseInt(process.env.OWNER_ID);
-
-      // Only allow owner to view all reports in date range
-      if (userId !== ownerId) {
-        // Regular admin can only see their own reports
-        const admin = await Admin.findOne({ telegramId: userId });
-        if (!admin) {
-          await ctx.reply('Пожалуйста, сначала зарегистрируйтесь, используя команду /start');
-          return;
-        }
-
-        // Find reports for this admin in the date range
-        const reports = await Report.find({
-          adminId: admin._id,
-          date: {
-            $gte: ctx.session.dateRange.startDate,
-            $lte: ctx.session.dateRange.endDate
-          }
-        }).populate('adminId').populate('objectId').sort({ date: -1 });
-
-        if (reports.length === 0) {
-          await ctx.reply(`У вас нет отчетов в периоде с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')}.`);
-        } else {
-          let reportText = `📊 Ваши отчеты с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')} (${reports.length}):\n\n`;
-
-          // Limit to first 50 reports to prevent message too long error
-          const reportsToShow = reports.slice(0, 50);
-
-          for (const report of reportsToShow) {
-            reportText += `📅 ${moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY HH:mm')}\n`;
-            reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
-            reportText += `🧹 Горничные: ${report.cleaners}\n`;
-            reportText += `👷 Подсобные: ${report.helpers}\n`;
-            reportText += `💰 Доплаты: ${report.payments}\n`;
-            reportText += `🔧 Поломки: ${report.malfunctions}\n`;
-            reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
-          }
-
-          if (reports.length > 50) {
-            reportText += `... и еще ${reports.length - 50} отчетов`;
-          }
-
-          await ctx.reply(reportText);
-        }
-      } else {
-        // Owner can see all reports in the date range
-        const reports = await Report.find({
-          date: {
-            $gte: ctx.session.dateRange.startDate,
-            $lte: ctx.session.dateRange.endDate
-          }
-        }).populate('adminId').populate('objectId').sort({ date: -1 });
-
-        if (reports.length === 0) {
-          await ctx.reply(`Нет отчетов в периоде с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')}.`);
-        } else {
-          let reportText = `📊 Отчеты с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')} (${reports.length}):\n\n`;
-
-          // Limit to first 50 reports to prevent message too long error
-          const reportsToShow = reports.slice(0, 50);
-
-          for (const report of reportsToShow) {
-            reportText += `📅 ${moment(report.date).tz('Europe/Moscow').format('DD.MM.YYYY HH:mm')}\n`;
-            reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
-            reportText += `👤 Администратор: ${report.adminId.name}\n`;
-            reportText += `🧹 Горничные: ${report.cleaners}\n`;
-            reportText += `👷 Подсобные: ${report.helpers}\n`;
-            reportText += `💰 Доплаты: ${report.payments}\n`;
-            reportText += `🔧 Поломки: ${report.malfunctions}\n`;
-            reportText += `✅ Готов к сдаче: ${report.readyForRent ? 'Да' : 'Нет'}\n\n`;
-          }
-
-          if (reports.length > 50) {
-            reportText += `... и еще ${reports.length - 50} отчетов`;
-          }
-
-          await ctx.reply(reportText);
-        }
-      }
-
-      // Reset session and return to main menu
-      ctx.session.waitingFor = null;
-      ctx.session.dateRange = null;
-      ctx.session.menuState = 'main';
-
-      let keyboard;
-      if (userId === ownerId) {
-        // Owner menu - full access
-        keyboard = Markup.keyboard([
-          ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
-          ['ℹ️ Помощь']
-        ]).resize();
-        // ['📊 Сегодняшние отчеты', '🔧 Управление объектами'], //временно закоментировано
-      } else {
-        // Regular admin menu - limited access
-        keyboard = Markup.keyboard([
-          ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
-          ['ℹ️ Помощь']
-        ]).resize();
-      }
-
-      await ctx.reply('Выберите действие:', {
-        reply_markup: keyboard
-      });
-    } catch (error) {
-      console.error('Error parsing end date:', error);
-      await ctx.reply('Произошла ошибка при обработке даты. Пожалуйста, попробуйте снова.');
-      ctx.session.waitingFor = null;
-    }
-    return;
+    // Ask for end date
+    ctx.session.waitingFor = 'date_range_end';
+    await ctx.reply('Введите конечную дату в формате ДД.ММ.ГГГГ (например, 31.01.2024):');
+  } catch (error) {
+    console.error('Error parsing start date:', error);
+    console.error('Error stack:', error.stack);
+    await ctx.reply('Произошла ошибка при обработке даты. Пожалуйста, попробуйте снова.');
+    ctx.session.waitingFor = null;
   }
+  return;
+} else if (ctx.session.waitingFor === 'date_range_end') {
+  try {
+    console.log('Processing end date:', ctx.message.text);
+    
+    // Parse the end date
+    const endDate = moment(ctx.message.text, 'DD.MM.YYYY', true);
+
+    if (!endDate.isValid()) {
+      console.log('Invalid end date format');
+      await ctx.reply('Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ (например, 31.01.2024):');
+      return;
+    }
+
+    // Store the end date
+    ctx.session.dateRange.endDate = endDate.endOf('day').toDate(); // Include the whole end day
+    console.log('End date stored:', ctx.session.dateRange.endDate);
+
+    // Validate that end date is not before start date
+    if (ctx.session.dateRange.endDate < ctx.session.dateRange.startDate) {
+      await ctx.reply('Конечная дата не может быть раньше начальной даты. Пожалуйста, введите конечную дату снова:');
+      return;
+    }
+
+    // Now get reports for the date range
+    const userId = ctx.from.id;
+    const ownerId = parseInt(process.env.OWNER_ID);
+
+    // Only allow owner to view all reports in date range
+    if (userId !== ownerId) {
+      // Regular admin can only see their own reports
+      const admin = await Admin.findOne({ telegramId: userId });
+      if (!admin) {
+        await ctx.reply('Пожалуйста, сначала зарегистрируйтесь, используя команду /start');
+        return;
+      }
+
+      // Find reports for this admin in the date range
+      const reports = await Report.find({
+        adminId: admin._id,
+        date: {
+          $gte: ctx.session.dateRange.startDate,
+          $lte: ctx.session.dateRange.endDate
+        }
+      }).populate('adminId').populate('objectId').populate('objectIds').sort({ date: -1 });
+
+      console.log(`Found ${reports.length} reports for admin ${admin.name}`);
+
+      if (reports.length === 0) {
+        await ctx.reply(`У вас нет отчетов в периоде с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')}.`);
+      } else {
+        // Формируем отчеты частями
+        await sendReportsInParts(ctx, reports, false);
+      }
+    } else {
+      // Owner can see all reports in the date range
+      const reports = await Report.find({
+        date: {
+          $gte: ctx.session.dateRange.startDate,
+          $lte: ctx.session.dateRange.endDate
+        }
+      }).populate('adminId').populate('objectId').populate('objectIds').sort({ date: -1 });
+
+      console.log(`Found ${reports.length} reports for date range`);
+
+      if (reports.length === 0) {
+        await ctx.reply(`Нет отчетов в периоде с ${moment(ctx.session.dateRange.startDate).format('DD.MM.YYYY')} по ${moment(ctx.session.dateRange.endDate).format('DD.MM.YYYY')}.`);
+      } else {
+        // Формируем отчеты частями
+        await sendReportsInParts(ctx, reports, true);
+      }
+    }
+
+    // Reset session and return to main menu
+    ctx.session.waitingFor = null;
+    ctx.session.dateRange = null;
+    ctx.session.menuState = 'main';
+
+    let keyboard;
+    if (userId === ownerId) {
+      // Owner menu - full access
+      keyboard = Markup.keyboard([
+        ['📊 Сегодняшние отчеты', '📝 Отправить отчет'],
+        ['ℹ️ Помощь']
+      ]).resize();
+    } else {
+      // Regular admin menu - limited access
+      keyboard = Markup.keyboard([
+        ['📝 Отправить отчет', '📊 Сегодняшние отчеты'],
+        ['ℹ️ Помощь']
+      ]).resize();
+    }
+
+    await ctx.reply('Выберите действие:', {
+      reply_markup: keyboard
+    });
+  } catch (error) {
+    console.error('Error parsing end date:', error);
+    console.error('Error stack:', error.stack);
+    await ctx.reply('Произошла ошибка при обработке даты. Пожалуйста, попробуйте снова.');
+    ctx.session.waitingFor = null;
+  }
+  return;
+}
 
   // Only process if user is in the middle of submitting a report
   if (ctx.session.waitingFor) {
@@ -1183,7 +1262,10 @@ bot.action(/^ready_for_rent_(.+)$/, async (ctx) => {
       return;
     }
 
-    // Create a single report with multiple objects
+    // Преобразуем строки в ObjectId перед сохранением
+    const objectIdsToSave = ctx.session.selectedObjectIds.map(id => new mongoose.Types.ObjectId(id));
+
+    // Создаем один отчет с массивом объектов
     const newReport = new Report({
       adminId: admin._id,
       cleaners: ctx.session.reportData.cleaners,
@@ -1191,8 +1273,8 @@ bot.action(/^ready_for_rent_(.+)$/, async (ctx) => {
       payments: ctx.session.reportData.payments,
       malfunctions: ctx.session.reportData.malfunctions,
       readyForRent: readyStatus,
-      objectId: ctx.session.selectedObjectIds.length > 0 ? ctx.session.selectedObjectIds[0] : ctx.session.selectedObjectId, // Keep backward compatibility
-      objectIds: ctx.session.selectedObjectIds // Store all selected objects
+      objectId: objectIdsToSave.length > 0 ? objectIdsToSave[0] : ctx.session.selectedObjectId, // Оставляем первый объект как основной для совместимости
+      objectIds: objectIdsToSave // Сохраняем все выбранные объекты
     });
 
     await newReport.save();

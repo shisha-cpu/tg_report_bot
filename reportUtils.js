@@ -4,10 +4,11 @@ const ObjectModel = require('./models/Object');
 const moment = require('moment-timezone');
 
 // Function to send daily summary to the owner
+// Function to send daily summary to the owner
+// Function to send daily summary to the owner
 const sendDailySummary = async (bot, ownerId) => {
   try {
     // Get today's date with timezone consideration
-    const moment = require('moment-timezone');
     const todayStart = moment().tz('Europe/Moscow').startOf('day').toDate();
     const todayEnd = moment().tz('Europe/Moscow').endOf('day').toDate();
 
@@ -19,7 +20,8 @@ const sendDailySummary = async (bot, ownerId) => {
       }
     })
     .populate('adminId')
-    .populate('objectId');
+    .populate('objectId')
+    .populate('objectIds');
 
     if (reports.length === 0) {
       await bot.telegram.sendMessage(ownerId, `📊 Нет отчетов за ${moment().tz('Europe/Moscow').format('DD.MM.YYYY')}`);
@@ -43,7 +45,20 @@ const sendDailySummary = async (bot, ownerId) => {
       reportText += `👤 Администратор: ${adminName}\n`;
 
       for (const report of adminReports) {
-        reportText += `🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+        // Если у отчета есть массив объектов, отображаем все объекты
+        if (report.objectIds && report.objectIds.length > 0) {
+          // Получаем адреса всех объектов
+          const objectAddresses = report.objectIds.map(obj => 
+            obj.description || obj.address || 'Не указан'
+          ).join(', ');
+          reportText += `🏠 Объекты: ${objectAddresses}\n`;
+        } else if (report.objectId) {
+          // Для обратной совместимости - отображаем один объект
+          reportText += `🏠 Объект: ${report.objectId?.description || report.objectId?.address || 'Не указан'}\n`;
+        } else {
+          reportText += `🏠 Объект: Не указан\n`;
+        }
+
         reportText += `🧹 Горничные: ${report.cleaners}\n`;
         reportText += `👷 Подсобные: ${report.helpers}\n`;
         reportText += `💰 Доплаты: ${report.payments}\n`;
@@ -58,7 +73,6 @@ const sendDailySummary = async (bot, ownerId) => {
     console.error('Error sending daily summary:', error);
   }
 };
-
 // Function to send reports for a specific date range
 const sendReportsForDateRange = async (bot, ownerId, startDate, endDate) => {
   try {
@@ -71,6 +85,7 @@ const sendReportsForDateRange = async (bot, ownerId, startDate, endDate) => {
     })
     .populate('adminId')
     .populate('objectId')
+    .populate('objectIds')
     .sort({ date: -1 });
 
     if (reports.length === 0) {
@@ -107,7 +122,19 @@ const sendReportsForDateRange = async (bot, ownerId, startDate, endDate) => {
         reportText += `  👤 ${adminName}:\n`;
 
         for (const report of adminReports) {
-          reportText += `    🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+          // Если у отчета есть массив объектов, отображаем все объекты
+          if (report.objectIds && report.objectIds.length > 0) {
+            // Делаем отдельный запрос для получения информации об объектах
+            const objects = await ObjectModel.find({ _id: { $in: report.objectIds } });
+            const objectAddresses = objects.map(obj => obj.address || obj.description).join(', ');
+            reportText += `    🏠 Объекты: ${objectAddresses}\n`;
+          } else if (report.objectId) {
+            // Для обратной совместимости - отображаем один объект
+            reportText += `    🏠 Объект: ${report.objectId?.address || 'Не указан'}\n`;
+          } else {
+            reportText += `    🏠 Объект: Не указан\n`;
+          }
+
           reportText += `    🧹 Горничные: ${report.cleaners}\n`;
           reportText += `    👷 Подсобные: ${report.helpers}\n`;
           reportText += `    💰 Доплаты: ${report.payments}\n`;

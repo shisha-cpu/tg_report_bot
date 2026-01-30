@@ -550,9 +550,9 @@ bot.action('back_to_manage_objects', async (ctx) => {
     ['🗑️ Удалить объект', '🔙 Назад']
   ]).resize();
 
-  await ctx.editMessageText('Управление объектами:', {
+  /*await ctx.editMessageText('Управление объектами:', {
     reply_markup: keyboard
-  });
+  });*/
 });
 
 // Handle callback queries for deleting object
@@ -577,9 +577,9 @@ bot.action(/^delete_object_(.+)$/, async (ctx) => {
       ['🗑️ Удалить объект', '🔙 Назад']
     ]).resize();
 
-    await ctx.reply('Управление объектами:', {
+    /*await ctx.reply('Управление объектами:', {
       reply_markup: keyboard
-    });
+    });*/
   } catch (error) {
     console.error('Error deleting object:', error);
     await ctx.answerCbQuery('Ошибка при удалении объекта');
@@ -866,7 +866,7 @@ bot.action('view_all_reports', async (ctx) => {
   let keyboard;
   if (userId === ownerId) {
     keyboard = Markup.keyboard([
-      ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+      ['📊 Сегодняшние отчеты'/*, '🔧 Управление объектами'*/],
       ['📝 Отправить отчет', 'ℹ️ Помощь']
     ]).resize();
   } else {
@@ -1217,9 +1217,9 @@ if (ctx.session.waitingFor === 'date_range_start') {
       ]
     };
 
-    await ctx.reply('Управление объектами:', {
+    /*await ctx.reply('Управление объектами:', {
       reply_markup: keyboard
-    });
+    });*/
   } else if (ctx.message.text === '🔙 Назад') {
     // Handle back button from other contexts
     ctx.session.menuState = 'main';
@@ -1234,7 +1234,7 @@ if (ctx.session.waitingFor === 'date_range_start') {
     if (userId === ownerId) {
       // Owner menu - full access
       keyboard = Markup.keyboard([
-        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+        ['📊 Сегодняшние отчеты'/*, '🔧 Управление объектами'*/],
         ['📝 Отправить отчет', 'ℹ️ Помощь']
       ]).resize();
     } else {
@@ -1297,7 +1297,7 @@ bot.action(/^ready_for_rent_(.+)$/, async (ctx) => {
     if (userId === ownerId) {
       // Owner menu - full access
       keyboard = Markup.keyboard([
-        ['📊 Сегодняшние отчеты', '🔧 Управление объектами'],
+        ['📊 Сегодняшние отчеты'/*, '🔧 Управление объектами'*/],
         ['📝 Отправить отчет', 'ℹ️ Помощь']
       ]).resize();
     } else {
